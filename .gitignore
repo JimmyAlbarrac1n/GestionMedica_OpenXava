@@ -1,0 +1,65 @@
+# .gitignore for Maven / OpenXava Java webapp
+# NOTE: 'data/' is intentionally NOT ignored (kept in repo per user request).
+
+# Maven build output
+/target/
+
+# Temp/build dirs used by the app
+/temp/
+/work/
+
+# Tomcat / app server work and logs (local IDE/runtime)
+temp/
+work/
+logs/
+*.log
+
+# IDEs
+/.idea/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+
+# IntelliJ out
+/out/
+
+# Eclipse
+bin/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated files
+*.class
+*.jar
+*.war
+*.ear
+
+# Node modules or other build caches (if used in project root)
+node_modules/
+
+# Local env files
+.env
+
+# Maven dependency plugin markers
+dependency-maven-plugin-markers/
+
+# Generated OpenXava resources that are unpacked into src/main/resources
+# (if you prefer to ignore them uncomment the next line)
+# src/main/resources/xava/dtds/
+
+# Logs and temp files in workspace
+temp/*
+
+# Ignore IntelliJ/maven configuration local files
+/.idea/
+
+# Keep data/ (explicitly) - do not ignore it
+# If you later want to ignore specific data files (e.g. DB locks), add entries like:
+# data/*.lck
+
+# End of file
