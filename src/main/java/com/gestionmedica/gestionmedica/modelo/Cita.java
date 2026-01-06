@@ -7,17 +7,16 @@ import org.openxava.validators.*;
 import lombok.*;
 import java.time.LocalDate;
 import java.time.LocalTime;
-import java.time.temporal.ChronoUnit;
+import java.time.DayOfWeek;
+import java.time.format.DateTimeFormatter;
 import com.gestionmedica.gestionmedica.modelo.enums.*;
 
 @Entity
 @Getter @Setter
 @View(members=
     "paciente;" +
-    "medico;" +
-    "horario;" +
     "agendamiento[" +
-        "fechaCita; horaInicio; horaFin" +
+        "medico; fechaCita; numeroSlot; horaDelSlotTexto" +
     "];" +
     "detalles[" +
         "motivoConsulta; estado" +
@@ -39,34 +38,19 @@ public class Cita {
     private Paciente paciente;
     
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @DescriptionsList(
-        descriptionProperties="nombre, apellido, especialidad.nombre",
-        condition="${estado} = 'ACTIVO'"
-    )
+    @DescriptionsList(descriptionProperties="nombre, apellido, especialidad.nombre")
     @Required
     private Medico medico;
-    
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @DescriptionsList(
-        descriptionProperties="medico.nombre, diaSemana, horaInicio, horaFin",
-        condition="${estado} = 'ACTIVO'"
-    )
-    @Required
-    private HorarioDisponible horario;
     
     @Column
     @Required
     private LocalDate fechaCita;
     
     @Column
-    @ReadOnly // Se calcula automáticamente del horario
-    @Stereotype("TIME")
-    private LocalTime horaInicio;
+    @Required
+    private Integer numeroSlot;
+
     
-    @Column
-    @ReadOnly
-    @Stereotype("TIME")
-    private LocalTime horaFin;
     
     @Enumerated(EnumType.STRING)
     @Required
@@ -84,57 +68,230 @@ public class Cita {
     @ReadOnly
     private LocalDate fechaCancelacion;
     
+    // Duración fija de cada slot en minutos
+    private static final int DURACION_MINUTOS = 30;
+    // Máximo de slots por turno (8 horas = 480 min / 30 min = 16 slots)
+    private static final int MAX_SLOTS = 16;
+    
     @PrePersist
     protected void onCreate() {
         fechaRegistro = LocalDate.now();
         if (estado == null) {
             estado = EstadoCita.REGISTRADA;
         }
-        if (horario != null) {
-            horaInicio = horario.getHoraInicio();
-            horaFin = horario.getHoraFin();
-        }
+        
+        validarFechaNoPasada();
+        validarSlotValido();
+        validarHorarioMedico();
         validarDisponibilidad();
     }
     
     @PreUpdate
     protected void onUpdate() {
         if (estado == EstadoCita.CANCELADA && fechaCancelacion == null) {
-            validarAnticipacion24Horas();
             fechaCancelacion = LocalDate.now();
         }
     }
     
-    // VALIDACIÓN CRÍTICA: Evita doble reserva
-    private void validarDisponibilidad() {
-        // Busca si ya existe otra cita en el mismo horario y fecha
-        Long count = (Long) XPersistence.getManager()
-            .createQuery("SELECT COUNT(c) FROM Cita c WHERE " +
-                        "c.horario.id = :horarioId AND " +
-                        "c.fechaCita = :fecha AND " +
-                        "c.estado != 'CANCELADA' AND " +
-                        "c.id != :citaId")
-            .setParameter("horarioId", horario.getIdHorario())
-            .setParameter("fecha", fechaCita)
-            .setParameter("citaId", idCita == null ? 0 : idCita)
-            .getSingleResult();
-            
-        if (count > 0) {
+    // ===== VALIDACIONES =====
+    
+    private void validarFechaNoPasada() {
+        if (fechaCita.isBefore(LocalDate.now())) {
             throw new ValidationException(
-                "Este horario ya está ocupado para la fecha seleccionada"
+                "No puede agendar citas en fechas pasadas"
             );
         }
     }
     
-    // VALIDACIÓN: 24 horas de anticipación
-    private void validarAnticipacion24Horas() {
-        LocalDate ahora = LocalDate.now();
-        long diasRestantes = ChronoUnit.DAYS.between(ahora, fechaCita);
-        
-        if (diasRestantes < 1) {
+    /**
+     * Obtiene el día de la semana derivado de la fecha
+     */
+    private DiaSemana obtenerDiaDesdeFecha() {
+        DayOfWeek diaSemanaFecha = fechaCita.getDayOfWeek();
+        String diaSemanaStr = convertirDiaSemana(diaSemanaFecha);
+        return DiaSemana.valueOf(diaSemanaStr);
+    }
+    
+    /**
+     * Valida que el slot esté en rango válido (1-16)
+     */
+    private void validarSlotValido() {
+        if (numeroSlot == null || numeroSlot < 1 || numeroSlot > MAX_SLOTS) {
             throw new ValidationException(
-                "Debe cancelar con al menos 24 horas de anticipación"
+                "El slot debe estar entre 1 y " + MAX_SLOTS
             );
         }
+    }
+
+    
+    
+    /**
+     * Valida que el médico tenga horario activo para ese día
+     */
+    private void validarHorarioMedico() {
+        DiaSemana diaDerido = obtenerDiaDesdeFecha();
+        
+        HorarioDisponible horarioMedico = null;
+        try {
+            horarioMedico = XPersistence.getManager()
+                .createQuery("SELECT h FROM HorarioDisponible h WHERE " +
+                            "h.medico.id = :medicoId AND " +
+                            "h.diaSemana = :diaSemana AND " +
+                            "h.estado = 'ACTIVO'", HorarioDisponible.class)
+                .setParameter("medicoId", medico.getIdMedico())
+                .setParameter("diaSemana", diaDerido)
+                .getResultList()
+                .stream()
+                .findFirst()
+                .orElse(null);
+        } catch (Exception e) {
+            throw new ValidationException(
+                "Error al verificar horario del médico"
+            );
+        }
+        
+        if (horarioMedico == null) {
+            throw new ValidationException(
+                "El médico no tiene horario activo para ese día"
+            );
+        }
+    }
+    
+    /**
+     * Valida que no exista otra cita en el mismo slot
+     */
+    private void validarDisponibilidad() {
+        Long count = XPersistence.getManager()
+            .createQuery("SELECT COUNT(c) FROM Cita c WHERE " +
+                        "c.medico.id = :medicoId AND " +
+                        "c.fechaCita = :fecha AND " +
+                        "c.numeroSlot = :slot AND " +
+                        "c.estado != 'CANCELADA' AND " +
+                        "c.idCita != :citaId", Long.class)
+            .setParameter("medicoId", medico.getIdMedico())
+            .setParameter("fecha", fechaCita)
+            .setParameter("slot", numeroSlot)
+            .setParameter("citaId", idCita == null ? 0 : idCita)
+            .getSingleResult();
+        
+        if (count > 0) {
+            throw new ValidationException(
+                "El médico ya tiene una cita en ese slot"
+            );
+        }
+    }
+    
+    private String convertirDiaSemana(DayOfWeek dia) {
+        switch(dia) {
+            case MONDAY:
+                return "LUNES";
+            case TUESDAY:
+                return "MARTES";
+            case WEDNESDAY:
+                return "MIERCOLES";
+            case THURSDAY:
+                return "JUEVES";
+            case FRIDAY:
+                return "VIERNES";
+            case SATURDAY:
+                return "SABADO";
+            case SUNDAY:
+                return "DOMINGO";
+            default:
+                return "";
+        }
+    }
+    
+    /**
+     * Calcula la hora de inicio del slot
+     */
+    public LocalTime getHoraDelSlot() {
+        // Si no hay médico o fecha aún, no intentar conversión
+        if (medico == null || fechaCita == null || numeroSlot == null) return null;
+
+        HorarioDisponible horario = null;
+        try {
+            horario = XPersistence.getManager()
+                .createQuery("SELECT h FROM HorarioDisponible h WHERE " +
+                            "h.medico.id = :medicoId AND " +
+                            "h.diaSemana = :diaSemana AND " +
+                            "h.estado = 'ACTIVO'", HorarioDisponible.class)
+                .setParameter("medicoId", medico.getIdMedico())
+                .setParameter("diaSemana", obtenerDiaDesdeFecha())
+                .getResultList()
+                .stream()
+                .findFirst()
+                .orElse(null);
+        } catch (Exception e) {
+            return null;
+        }
+
+        if (horario == null) return null;
+
+        LocalTime inicio = horario.getHoraInicioTurno();
+        if (inicio == null) return null;
+        try {
+            return inicio.plusMinutes((numeroSlot - 1) * DURACION_MINUTOS);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @Transient
+    @ReadOnly
+    public String getHoraDelSlotTexto() {
+        LocalTime hora = getHoraDelSlot();
+        if (hora == null) return "";
+        try {
+            return hora.format(DateTimeFormatter.ofPattern("HH:mm"));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    @Transient
+    @ReadOnly
+    public String getInformacionSlots() {
+        HorarioDisponible horario = null;
+        try {
+            horario = (HorarioDisponible) XPersistence.getManager()
+                .createQuery("SELECT h FROM HorarioDisponible h WHERE " +
+                            "h.medico.id = :medicoId AND " +
+                            "h.diaSemana = :diaSemana AND " +
+                            "h.estado = 'ACTIVO'")
+                .setParameter("medicoId", medico.getIdMedico())
+                .setParameter("diaSemana", obtenerDiaDesdeFecha())
+                .getResultList()
+                .stream()
+                .findFirst()
+                .orElse(null);
+        } catch (Exception e) {
+            return "Error al obtener horario del médico";
+        }
+
+        if (horario == null) {
+            return "No hay horario activo para el médico en la fecha seleccionada.";
+        }
+
+        LocalTime inicio = horario.getHoraInicioTurno();
+                DateTimeFormatter fmt = DateTimeFormatter.ofPattern("HH:mm");
+        StringBuilder sb = new StringBuilder();
+        for (int s = 1; s <= MAX_SLOTS; s++) {
+            LocalTime slotStart = inicio.plusMinutes((s - 1) * DURACION_MINUTOS);
+            LocalTime slotEnd = slotStart.plusMinutes(DURACION_MINUTOS);
+            sb.append("Slot ").append(s).append(": ")
+              .append(slotStart.format(fmt)).append(" - ")
+              .append(slotEnd.format(fmt));
+            if (s < MAX_SLOTS) sb.append("\n");
+        }
+        return sb.toString();
+    }
+    
+    public String toString() {
+         String hora = getHoraDelSlotTexto();
+         if (hora.isEmpty()) hora = "SIN HORA";
+         return fechaCita + " " + hora + " (Slot " + numeroSlot + ") - " + 
+             (medico != null ? medico.getNombre() : "-") + " - " + 
+             (paciente != null ? paciente.getNombre() : "-");
     }
 }
