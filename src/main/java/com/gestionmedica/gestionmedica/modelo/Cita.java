@@ -86,13 +86,6 @@ public class Cita {
         validarDisponibilidad();
     }
     
-    @PreUpdate
-    protected void onUpdate() {
-        if (estado == EstadoCita.CANCELADA && fechaCancelacion == null) {
-            fechaCancelacion = LocalDate.now();
-        }
-    }
-    
     // ===== VALIDACIONES =====
     
     private void validarFechaNoPasada() {
@@ -239,6 +232,7 @@ public class Cita {
 
     @Transient
     @ReadOnly
+    @Hidden
     public String getHoraDelSlotTexto() {
         LocalTime hora = getHoraDelSlot();
         if (hora == null) return "";

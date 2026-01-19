@@ -2,12 +2,14 @@ package com.gestionmedica.gestionmedica.modelo;
 
 import javax.persistence.*;
 import org.openxava.annotations.*;
+import org.openxava.jpa.XPersistence;
 import lombok.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import org.openxava.annotations.ReadOnly;
 import javax.persistence.Transient;
 import com.gestionmedica.gestionmedica.modelo.enums.*;
+import org.openxava.validators.ValidationException;
 
 @Entity
 @Getter @Setter
@@ -44,14 +46,42 @@ public class HorarioDisponible {
     
     @PrePersist
     protected void onCreate() {
+        validarTurnoUnicoPorDia();
         if (estado == null) {
             estado = EstadoHorario.ACTIVO;
+        }
+    }
+    
+    @PreUpdate
+    protected void onUpdate() {
+        // No validar turno único al actualizar, permite cambiar de turno
+        if (estado == null) {
+            estado = EstadoHorario.ACTIVO;
+        }
+    }
+    
+    private void validarTurnoUnicoPorDia() {
+        Long count = XPersistence.getManager()
+            .createQuery("SELECT COUNT(h) FROM HorarioDisponible h WHERE " +
+                        "h.medico.id = :medicoId AND " +
+                        "h.diaSemana = :diaSemana AND " +
+                        "h.estado = 'ACTIVO'", Long.class)
+            .setParameter("medicoId", medico.getIdMedico())
+            .setParameter("diaSemana", diaSemana)
+            .getSingleResult();
+        
+        if (count > 0) {
+            throw new ValidationException(
+                "El médico ya tiene asignado un turno para el día " + diaSemana + 
+                ". No se puede asignar más de un turno por día."
+            );
         }
     }
     
     /**
      * Retorna la hora de inicio del turno asociado
      */
+    @Hidden
     public LocalTime getHoraInicioTurno() {
         switch(turno) {
             case MATUTINO:
@@ -70,7 +100,7 @@ public class HorarioDisponible {
     /**
      * Retorna la hora de fin del turno asociado
      */
-    public LocalTime getHoraFinTurno() {
+    private LocalTime getHoraFinTurno() {
         switch(turno) {
             case MATUTINO:
                 return LocalTime.of(14, 0);
@@ -105,7 +135,17 @@ public class HorarioDisponible {
         return inicio.format(fmt) + " - " + fin.format(fmt);
     }
     
+    /**
+     * Retorna el turno con su rango horario (ej: "MATUTINO (08:00-14:00)")
+     */
+    @Transient
+    @ReadOnly
+    public String getTurnoConRango() {
+        if (turno == null) return "";
+        return turno.toString() + " (" + getRangoHorario() + ")";
+    }
+    
     public String toString() {
-        return medico.getNombre() + " - " + diaSemana + " " + turno + " (" + getRangoHorario() + ")";
+        return medico.getNombre() + " - " + diaSemana + " " + getTurnoConRango();
     }
 }
